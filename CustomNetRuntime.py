@@ -9,7 +9,8 @@ from torch.utils.data import random_split, DataLoader
 
 val_source_images = "./val_source"
 val_inference_images = "./val_reconstructed"
-
+# DataLoaders for batching
+batch_size = 64
 
 def return_dataloaders():
 
@@ -32,18 +33,11 @@ def return_dataloaders():
     # Randomly split the dataset
     train_dataset, val_dataset, test_dataset = random_split(dataset, [train_size, val_size, test_size])
 
-    # DataLoaders for batching
-    batch_size = 64
-
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True,num_workers=8, pin_memory=True)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False,num_workers=8, pin_memory=True)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False,num_workers=8, pin_memory=True)
 
     return train_loader,val_loader,test_loader 
-
-
-
-
 
 def main():
     # Check if CUDA is available
@@ -62,10 +56,14 @@ def main():
     epochs = 20
     print("Started training and validation")
     for epoch in range(epochs):        
-        train_loss = model.train_epoch( train_loader, optimizer, criterion, device, epoch)
+        train_loss = model.train_epoch( train_loader, optimizer, criterion, device, epoch, profile= False)
+
+        print(f"Train Loss: {train_loss:.4f}")
+
         val_loss = model.validate_epoch(val_loader, criterion, device,epoch,val_source_images, val_inference_images)
+
         print(f"Epoch {epoch + 1}/{epochs}")
-        print(f"Train Loss: {train_loss:.4f}, Validation Loss: {val_loss:.4f}")
+        print(f"Val Loss: {val_loss:.4f}")
 
 
 if __name__ == '__main__':
