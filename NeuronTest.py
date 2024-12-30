@@ -9,27 +9,33 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 
 # 1. Function to create a simple dataset
-def create_dataset(num_samples=100000):
+def create_dataset(num_samples=10000):
     """Generate a dataset where the second column is 1 if the first column is between 0.3 and 0.7, otherwise 0."""
     x = torch.rand(num_samples, 1)  # Inputs between 0 and 1
     y = ((x >= 0.3) & (x <= 0.7)).float()  # Labels: 1 if 0.3 <= x <= 0.7, else 0
     return x, y
 
-# 2. Custom Neuron Class
 class CustomNeuron(nn.Module):
     def __init__(self):
         super(CustomNeuron, self).__init__()
-        self.steepness  = nn.Parameter(torch.tensor(1e3),requires_grad=False)   
-        self.left_limit = nn.Parameter(torch.tensor([torch.empty(1).uniform_(1e-2, 9*1e2).item()]),requires_grad=True)
-        self.param_diff = nn.Parameter(torch.randn(1)*10,requires_grad=True) 
-        self.max_value = nn.Parameter(torch.tensor(1e3),requires_grad=False)  
+        self.steepness  = nn.Parameter(torch.tensor(1.0),requires_grad=False)   
+        self.left_limit = nn.Parameter(torch.tensor(3.0),requires_grad=True)
+        self.param_diff = nn.Parameter(torch.tensor(4.0),requires_grad=True) 
+        self.max_value = nn.Parameter(torch.tensor(1),requires_grad=False)  
+        self.min_value = nn.Parameter(torch.tensor(0.01),requires_grad=False) 
+        self.epsilon = torch.tensor(1e-3,device='cuda')
 
     def forward(self, x):
         #y\ =\ \tanh\left(\tanh\left(b\cdot x-p\right)\ -\ \tanh\left(c\cdot x-d\right)\right)
-        right_limit = self.left_limit + torch.nn.functional.softplus(self.param_diff)
-        right_limit= torch.clamp(right_limit, max=self.max_value)
-        activation = torch.tanh(torch.tanh(self.steepness*x-self.left_limit) -torch.tanh(self.steepness*x-right_limit))
-        return activation
+        #self.param_diff.data = torch.abs(self.param_diff) + self.epsilon
+        #right_limit = self.left_limit + self.param_diff
+        #right_limit= torch.clamp(right_limit, max=self.max_value)
+
+        #self.left_limit.data = torch.clamp(torch.tensor(torch.tensor(1e-5),device='cuda'), max=right_limit-self.min_value)
+
+        activation = torch.tanh(torch.tanh(1e3*self.steepness*x-1e2*self.left_limit) -torch.tanh(1e3*self.steepness*x-1e2*(self.left_limit + self.param_diff)))
+        return (torch.round(activation * 1e6) / 1e6)/torch.tensor(0.964028)
+		
 
 # 3. Simple nn.Linear Neuron Class
 class LinearNeuron(nn.Module):
@@ -50,8 +56,8 @@ def train(model, criterion, optimizer, dataloader,device, epochs=100):
         for x_batch, y_batch in dataloader:
             # Forward pass
             raw_outputs = model(x_batch.to(device))
-            predictions = torch.sigmoid(raw_outputs)  # Apply sigmoid here
-            loss = criterion(predictions, y_batch.to(device))
+            predictions = torch.sigmoid(raw_outputs) # Apply sigmoid here
+            loss = criterion(raw_outputs, y_batch.to(device))
 
             # Backward pass
             optimizer.zero_grad()
@@ -73,7 +79,7 @@ def validate(model, dataloader, device):
         for x_batch, y_batch in dataloader:
             raw_outputs = model(x_batch.to(device))
             predictions = torch.sigmoid(raw_outputs)  # Apply sigmoid here
-            loss = nn.BCELoss()(predictions, y_batch.to(device))
+            loss = nn.MSELoss()(predictions, y_batch.to(device))
             total_loss += loss.item()
 
     print(f"Validation Loss: {total_loss / len(dataloader):.4f}")
@@ -109,9 +115,9 @@ if __name__ == "__main__":
     linear_neuron = LinearNeuron().to(device)
 
     # Loss function and optimizers
-    criterion = nn.BCEWithLogitsLoss()  # Binary Cross Entropy Loss
-    custom_optimizer = optim.Adam(custom_neuron.parameters(), lr=0.001)
-    linear_optimizer = optim.Adam(linear_neuron.parameters(), lr=0.001)
+    criterion = nn.MSELoss()  # Binary Cross Entropy Loss
+    custom_optimizer = optim.SGD(custom_neuron.parameters(), lr=0.1)
+    linear_optimizer = optim.SGD(linear_neuron.parameters(), lr=0.001)
 
     print("Training Custom Neuron:")
     train(custom_neuron, criterion, custom_optimizer, train_loader, device, epochs=1000)
