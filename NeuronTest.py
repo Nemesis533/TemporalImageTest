@@ -8,9 +8,12 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 from torch.optim.lr_scheduler import CosineAnnealingLR
+import helper_functions as hf
+import os
+import torch.nn.functional as F
 
-train_model = False
-
+train_model = True
+batch_size=100
 
 def create_dataset(num_samples=100000):
     """Generate a dataset where the second column is 1 if the first column is between 0.3 and 0.7,
@@ -29,27 +32,80 @@ def create_dataset(num_samples=100000):
     
     return x, y
 
+class CustomNet(nn.Module):
+    def __init__(self):
+        super(CustomNet, self).__init__()
+        self.output = CustomLayer(1,3)        
+        self.model_name = "CustomNeuronTest"
+        self.model_save_dir ="./Models"
+        self.loss = nn.Parameter(torch.tensor(10e9), requires_grad=False)
+    
+    def forward(self, x):
+
+        x = self.output(x)
+        return x
+    
+    def save_model(self):
+        # Ensure the directory exists
+        os.makedirs(f'{self.model_save_dir}{self.model_name}', exist_ok=True)
+
+        # Now save the model
+        torch.save(self.state_dict(), f'{self.model_save_dir}{self.model_name}/{self.model_name}.pth')
+
+        #print(f'Model {self.model_name} saved successfully')
+
+    def load_model(self):
+        self.load_state_dict(torch.load(f'{self.model_save_dir}{self.model_name}/{self.model_name}.pth'))
+        
+        print(f'Model {self.model_name} loaded successfully - loss was {self.loss}')
+
+class CustomLayer(nn.Module):
+    def __init__(self, input_size, output_size):
+        super(CustomLayer, self).__init__()
+        self.neurons = nn.ModuleList([CustomNeuron() for _ in range(output_size)])
+
+    def forward(self, x):
+       
+        neuron_outputs = torch.stack([neuron(x) for neuron in self.neurons], dim=1)
+        output = neuron_outputs.squeeze(1)
+        
+        return output  
 
 class CustomNeuron(nn.Module):
     def __init__(self):
         super(CustomNeuron, self).__init__()
         self.steepness  = nn.Parameter(torch.tensor(1.0),requires_grad=False)   
-        self.left_limit = nn.Parameter(torch.tensor(3.0),requires_grad=True)
-        self.param_diff = nn.Parameter(torch.tensor(4.0),requires_grad=True) 
-        self.output = nn.Linear(1,3)
+        self.left_limit = nn.Parameter(torch.rand(1) ,requires_grad=True)
+        self.param_diff = nn.Parameter(torch.rand(1) ,requires_grad=True) 
+        self.base_multiplier = nn.Parameter(torch.rand(1)*1e3 ,requires_grad=True) 
+        self.param_multiplier = nn.Parameter(self.base_multiplier/10  ,requires_grad=False)  
+        self.gain = nn.Parameter(torch.rand(1) ,requires_grad=True) 
+        self.negative_gain = nn.Parameter(torch.rand(1) ,requires_grad=True) 
+        # Store learning rates
+        self.lr_dict = {
+            self.left_limit: 1,
+            self.param_diff: 1,
+            self.base_multiplier: 1,
+            self.gain: 0.1,
+            self.negative_gain : 0.1,
+        }
+
+    def apply_custom_lr(self):
+        # Scale gradients based on the specified learning rate
+        for param, lr in self.lr_dict.items():
+            if param.grad is not None:
+                param.grad *= lr  # Modify the gradient in-place
 
     def forward(self, x):
         #y\ =\ \tanh\left(\tanh\left(b\cdot x-p\right)\ -\ \tanh\left(c\cdot x-d\right)\right)
-        #self.param_diff.data = torch.abs(self.param_diff) + self.epsilon
-        #right_limit = self.left_limit + self.param_diff
-        #right_limit= torch.clamp(right_limit, max=self.max_value)
+        steepness = self.base_multiplier*self.steepness
+        first_param =self.param_multiplier*self.left_limit
+        second_param = self.param_multiplier*(self.left_limit + self.param_diff)
 
-        #self.left_limit.data = torch.clamp(torch.tensor(torch.tensor(1e-5),device='cuda'), max=right_limit-self.min_value)
+        activation = self.gain*torch.tanh(torch.tanh(steepness*x-first_param) - torch.tanh(steepness*x-second_param))-self.negative_gain
+       
 
-        activation = torch.tanh(torch.tanh(1e3*self.steepness*x-1e2*self.left_limit) + torch.tanh(1e3*self.steepness*x-1e2*(self.left_limit + self.param_diff)))
-        # (torch.round(activation * 1e6) / 1e6)/torch.tensor(0.964028)
-        x = self.output(activation.unsqueeze(1))
-        return x
+        return activation
 
 # 3. Simple nn.Linear Neuron Class
 class LinearNeuron(nn.Module):
@@ -60,56 +116,88 @@ class LinearNeuron(nn.Module):
 
 
     def forward(self, x):
-        x = self.linear(x.unsqueeze(1))
+        x = F.sigmoid(self.linear(x.unsqueeze(1)))
         x = self.output(x)
         return x
 
 # 4. Training Loop
 def train(model, criterion, optimizer, dataloader,device, epochs=100):
     model.to(device)
-    #scheduler = CosineAnnealingLR(optimizer, T_max=100, eta_min=0.0001)
-    
+    scheduler = CosineAnnealingLR(optimizer, T_max=5, eta_min=0.0001)
+    last_save_cycle = 0
+    last_save_loss = 0
+    highest_accuracy = 0
     for epoch in range(epochs):
         model.train()
         total_loss = 0.0
 
-    for x_batch, y_batch in dataloader:
-        # Forward pass: get raw outputs (logits)
-        raw_outputs = model(x_batch.to(device))
-        
-        # Apply BCEWithLogitsLoss directly (no need to apply sigmoid here)
-        loss = criterion(raw_outputs, y_batch.to(device))  # y_batch should be the same shape as raw_outputs
-        
-        # Apply sigmoid to the raw logits to get probabilities (optional, for analysis)
-        probabilities = torch.sigmoid(raw_outputs)
-        
-        # Get the predicted classes: 1 if probability > 0.5, else 0
-        predictions = (probabilities > 0.5).float()
+        for batch_idx,(x_batch, y_batch) in enumerate(dataloader):
+            model.train()
+            # Forward pass: get raw outputs (logits)
+            raw_outputs = model(x_batch.to(device))
+            
+            # Apply BCEWithLogitsLoss 
+            loss = criterion(raw_outputs, y_batch.to(device))  
+            
+
+            probabilities = torch.sigmoid(raw_outputs)
+            
+            # Get the predicted classes: 1 if probability > 0.5, else 0
+            predictions = (probabilities > 0.5).float()
 
             # Backward pass
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-        #scheduler.step()
-        
-        total_loss += loss.item()
-        
-        # Calculate the number of correct predictions (for multilabel classification, compare each class)
-        correct = (predictions == y_batch.to(device)).float().sum()  # This works for multilabel classification
-        
-        # Calculate accuracy: correct predictions divided by total predictions
-        accuracy = correct / y_batch.size(0)  # y_batch.size(0) gives the batch size
+            optimizer.zero_grad()
+            loss.backward()
 
-        #if (epoch + 1) % 10 == 0:
-            #print(f"Epoch [{epoch + 1}/{epochs}], Loss: {total_loss / len(dataloader):.6f}")
-            # Print or log the loss and accuracy
-    print(f"Loss: {loss.item()}, Accuracy: {accuracy.item()/3 * 100:.2f}%")
-        #print(f'Epoch Average Loss = {total_loss / len(dataloader):.6f}')
+            # Apply custom learning rates
+            try:
+                for neuron in model.output.neurons:
+                    neuron.apply_custom_lr()
+            except:
+                pass
+
+            optimizer.step()
+            scheduler.step()
+            
+            total_loss += loss.item()
+            
+            # Assuming predictions are thresholded binary (0/1) and y_batch is binary
+            correct = (predictions == y_batch.to(device)).float().mean()  # Element-wise comparison, then average
+            accuracy = correct.item()*100  # Convert to Python float
+
+            # Save model if current loss is better than the previous best
+            try:
+                if loss.item() < model.loss.item():
+                    highest_accuracy = accuracy
+                    model.loss = nn.Parameter(loss.detach(), requires_grad=False)
+                    model.save_model()
+                    last_save_cycle = batch_idx
+                    last_save_loss = loss.item()
+                    # print(f'Model {self.model_name} saved successfully')
+            
+            except:
+                pass
+
+            
+                
+
+            # Print progress
+            hf.progress_bar(
+                    iteration=batch_idx + 1, 
+                    total=len(train_loader), 
+                    prefix=f'Training Batch (Epoch: {epoch}): cycle {batch_idx} - accuracy is: {accuracy:.2f}%, loss is {loss.item()}', 
+                    suffix=f' Complete - Last Saved: {last_save_cycle} with loss {last_save_loss:.4f} - best accuracy is {highest_accuracy:.2f}', 
+                    length=50
+                )
    
 
 # Validation function
 def validate(model, dataloader, device):
-    model.eval()  # Set the model to evaluation mode
+    try:
+        model.load_model()
+    except:
+        pass
+    model.eval()
     correct = 0
     total = 0
     with torch.no_grad():
@@ -120,7 +208,7 @@ def validate(model, dataloader, device):
             raw_outputs = model(x_batch)
             
             # Apply sigmoid and threshold to get binary predictions
-            predictions = torch.sigmoid(raw_outputs) > 0.5  # Threshold at 0.5
+            predictions = (raw_outputs) > 0.5  # Threshold at 0.5
             
             # Calculate the number of correct predictions (compare each class)
             correct += (predictions == y_batch).sum().item()
@@ -149,11 +237,11 @@ if __name__ == "__main__":
     val_size = dataset_length - train_size  # Remaining for validation
 
     train_dataset, val_dataset = torch.utils.data.random_split(dataset, [train_size, val_size])
-    train_loader = DataLoader(train_dataset, batch_size=100, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=100, shuffle=False)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
 
     # Initialize models
-    custom_neuron = CustomNeuron().to(device)
+    custom_neuron = CustomNet().to(device)
     linear_neuron = LinearNeuron().to(device)
 
     # Loss function and optimizers
@@ -162,13 +250,13 @@ if __name__ == "__main__":
     linear_optimizer = optim.SGD(linear_neuron.parameters(), lr=0.001)
     if train_model:
         print("Training Custom Neuron:")
-        train(custom_neuron, criterion, custom_optimizer, train_loader, device, epochs=10000)
+        train(custom_neuron, criterion, custom_optimizer, train_loader, device, epochs=10)
         
         print("\nValidating Custom Neuron:")
         validate(custom_neuron, val_loader, device)
 
         print("\nTraining Linear Neuron:")
-        train(linear_neuron, criterion, linear_optimizer, train_loader, device,epochs=10000)
+        train(linear_neuron, criterion, linear_optimizer, train_loader, device,epochs=10)
         
         print("\nValidating Linear Neuron:")
         validate(linear_neuron, val_loader, device)
